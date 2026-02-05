@@ -1,14 +1,16 @@
 import numpy as np
+import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from utils import DatasetMetadata, MetadataManager
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score
 from sklearn.model_selection import LeaveOneOut
-from sklearn_lvq import GmlvqModel
+from sklvq import GMLVQ
 from sktime.classification.hybrid import HIVECOTEV2
 from sktime.classification.distance_based import ProximityForest
 from sktime.classification.kernel_based import RocketClassifier
 from sklearn.preprocessing import StandardScaler, Normalizer
+from sklearn.feature_selection import VarianceThreshold
 import pickle
 from tqdm import tqdm
 import xgboost as xgb
@@ -18,6 +20,7 @@ import features
 
 # SKLEARN PLEASE STOP
 warnings.filterwarnings("ignore", category=FutureWarning)
+
 
 # Fixes variability between runs
 SEED = 42
@@ -29,30 +32,27 @@ AVAILABLE_MODELS = {
     n_estimators=300,
     random_state=SEED,
     max_features='log2',
-    criterion='gini'), # Overall good results with RCE.
+    criterion='gini'), # Overall good results with RFE.
 
     "rf_mini":RandomForestClassifier(
     n_estimators=50,
     random_state=SEED,
     max_features='log2',
-    criterion='gini'), # When speed is absolutely necessary. Could be used for RCE.
+    criterion='gini'), # When speed is absolutely necessary. Could be used for RFE.
 
     "xgb":xgb.XGBClassifier(
-        n_estimators=12, #12
+        n_estimators=14, #12
         random_state=SEED,
-        #max_depth=48, #48 -> 82%
+        max_depth=48, #48 -> 82%
         reg_lambda=1.0, # 1.0
         reg_alpha=1.5, #1.5
         objective="binary:logistic",
     ), # Excellent results with TSFresh features (and without RCE)
 
-    "lvq":GmlvqModel(
-        prototypes_per_class=1,
-        regularization=0.0,
-        max_iter=2500,
-        beta=2,
+    "gmlvq":GMLVQ(
+        prototype_n_per_class=1,
         random_state=SEED,
-    ), # Not working properly right now, too slow and low performance.
+    ), # Don't use without feature selection
 
 # TIME SERIES MODELS
     "hive":HIVECOTEV2(
@@ -78,8 +78,8 @@ AVAILABLE_MODELS = {
 
 }
 
-# Features to cut down to using RFE or FeatBoost.
-N_FEATURES = 10
+# Features to cut down to using RFE.
+N_FEATURES = 5
 
 
 # Main training function
@@ -187,10 +187,23 @@ def train_and_evaluate_loocv(dataframe, run, keypoints, cut_mode, data_length,
     else:
         for task in run:
             for keypoint in keypoints:
-                inbetween = features.make_time_series(dataframe[task]["Data X"], keypoint)
-                X.append(inbetween)
-                feature_origins = feature_origins + ["KP"+str(keypoint)] * np.shape(inbetween)[1]
+                if type(keypoint) is int:
+                    inbetween = features.make_time_series(dataframe[task]["Data X"], keypoint)
+                    X.append(inbetween)
+                    feature_origins = feature_origins + ["KP" + str(keypoint)] * np.shape(inbetween)[1]
+                else:
+                    distances = []
+                    for i in range(0, n_patients):
+                        kp = keypoint.split("-")
+                        distances.append(features.distance_thumb_index(dataframe[task].iloc[i],
+                                                                       index=int(kp[0]),
+                                                                       thumb=int(kp[1]),
+                                                                       ),
+                                         )
 
+                    inbetween = distances
+                    X.append(inbetween)
+                    feature_origins = feature_origins + ["KP" + str(keypoint)] * np.shape(inbetween)[1]
 
     if model_name in ["hive", "rocket"]:
         X = np.stack(X, axis=1) # Train as multivariate
@@ -210,6 +223,9 @@ def train_and_evaluate_loocv(dataframe, run, keypoints, cut_mode, data_length,
     y = dataframe[task]["Diagnosis"].to_numpy()
     y = (y == "ET").astype(int)
     y = y.ravel()
+
+    # Prepare feature reporter
+    reporter = []
 
     # Progress bar
     pbar = tqdm(enumerate(loo.split(X)), desc="LOOCV", total=len(X), ncols=100)
@@ -233,7 +249,25 @@ def train_and_evaluate_loocv(dataframe, run, keypoints, cut_mode, data_length,
                 feature_select=feature_select,
             )
 
-            # Train the model
+            diagnosis_statistics = pd.DataFrame(X[:, reports])
+            diagnosis_statistics["label"] = y
+            diagnosis_statistics = diagnosis_statistics.groupby("label").mean()
+
+            indexy = []
+            for i in range(0, len(reports)):
+                indexy += [reports[i] % len(features.FeatureReporter.tsfresh_feature_list)]
+
+            # Honestly this could be done without the class but I plan to expand it later.
+            this_run_features = features.FeatureReporter().feature_block(
+                indexy,
+                diagnosis_statistics.iloc[0],
+                diagnosis_statistics.iloc[1],
+                run,
+                np.array(feature_origins)[reports],
+            )
+
+            reporter += [this_run_features]
+
             clf.fit(X_train_selected, y_train)
 
             # Predict and evaluate
@@ -258,6 +292,7 @@ def train_and_evaluate_loocv(dataframe, run, keypoints, cut_mode, data_length,
                     project=project,
                     feature_select=feature_select,
                 )
+
 
                 clf.fit(X_train_selected, y_train)
                 preds.append(clf.predict(X_test_selected))
@@ -316,6 +351,8 @@ def train_and_evaluate_loocv(dataframe, run, keypoints, cut_mode, data_length,
     print(f"Average F1 Score: {average_f1:.4f}")
     print(f"Average Recall: {average_recall:.4f}")
     print(f"Average Precision: {average_precision:.4f}")
+    with open("last_saved_run.pkl", 'wb') as file:
+        pickle.dump(reporter, file)
 
     return {"accuracy":accuracies,
             "f1":f1_scores,
@@ -349,7 +386,7 @@ def prepare_data(
         if np.shape(X_train)[1] > N_FEATURES:
             if feature_select == "rfe":
                 X_train_selected, X_test_selected, reports = features.rfe_select(
-                    X_train, X_test, y_train, AVAILABLE_MODELS["rf"], n_features=N_FEATURES,
+                    X_train, X_test, y_train, AVAILABLE_MODELS["rf_mini"], n_features=N_FEATURES,
                 )
 
             elif feature_select == "featboost":
@@ -361,9 +398,32 @@ def prepare_data(
                     random_state=SEED,
                 )
 
+
                 X_train_selected, X_test_selected, reports = features.featboost_select(
                     X_train, X_test, y_train, selectorXGB, n_features=N_FEATURES
                 )
+            elif feature_select == "corr_variance":
+                correlation_threshold = 0.90  # adjust as needed
+                var_sel = VarianceThreshold(threshold=0.001)
+
+
+                sel_features = var_sel.fit_transform(X_train)
+
+                corr_matrix = sel_features.corr().abs()
+
+                # Upper triangle mask
+                upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+
+                # Find features with correlation above threshold
+                to_drop = [col for col in upper.columns if any(upper[col] > correlation_threshold)]
+
+                sel_features = sel_features.drop(columns=to_drop)
+                return sel_features
+
+            elif feature_select == "none":
+                X_train_selected = X_train
+                X_test_selected = X_test
+
             else:
                 raise ValueError("Feature selection method not implemented.")
 
@@ -412,10 +472,19 @@ def vote_consensus(X_train, preds, certainty):
 
     return y_pred
 
+
 def vote_confidence(certainty):
-    certainty_array = np.array(certainty)
-    total_confidence = np.sum(certainty_array, axis=0)  # Sum confidence for each class
-    y_pred = [int(np.argmax(total_confidence))]  # 0 for CM, 1 for ET
+    # Assuming certainty is a list or array where each element is [p_cm, p_et] for each model
+    cert_array = np.squeeze(np.array(certainty), axis=1)  # Shape: (n_models, 2)
+
+    vote_confidence_cm = np.sum(cert_array[:, 0])
+    vote_confidence_et = np.sum(cert_array[:, 1])
+
+    if vote_confidence_et > vote_confidence_cm:
+        y_pred = [1]
+    else:
+        y_pred = [0]
+
     return y_pred
 
 def vote_expert(certainty):

@@ -6,6 +6,7 @@ import json
 import os
 import warnings
 
+
 # Stops Future Warnings from SKLearn. Not 100% required but makes Sktime's output basically unreadable when multithreading
 # if it isn't.
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -23,31 +24,35 @@ MODEL = "xgb"
 # Options :
 # "rf" - Random Forest. Record: 72% F1.
 # "xgb" - XGBoost. Record: 82% F1.
-# "lvq" - GMLVQ. Not fully tested yet. Current issues: Slow, errors out by default so I had to hack it to work,
-#                unsure if my hacks are correct yet.
-# "hive" - HIVECOTEV2. Not fully tested yet. Careful, it's slow.
-
-# Planned:
-# CNN/RESNET/Deep Learning using SKTime
+# "gmlvq" - GMLVQ. Record: 82% F1
 
 FEATURE_SELECTOR = "featboost"
 # One of "rfe" or "featboost"
 
-MODE = "features"
+MODE = "strict"
 # One of:
 # features - Calculates all subsets of tasks given
 # strict - Calculates only the specific combination of tasks given.
 
-COMBINE = "ensemble_tasks"
-VOTING = "confidence"
+COMBINE = "concatenate"
+# One of:
+# concatenate - put everything together
+# ensemble - separate a model per keypoint
+# ensemble_tasks - separate a model per task
+# There are fusion schemes in the paper
 
-SKIP = 0 # Skips feature elimination (No RCE, no PCA)
-PROJECT = 0 # Performs PCA if = 1, if feature elimination is not skipped. To skip RCE and not PCA, set number of features
+VOTING = "consensus"
+# One of:
+# consensus
+# confidence
+
+SKIP = 0 # Skips feature elimination (No RFE, no PCA) if true.
+PROJECT = 0 # Performs PCA if true, if feature elimination is not skipped. To skip RCE and not PCA, set number of features
 # to a really high number (>100).
-RAW = 0 # Skips tsfresh feature generation (uses only raw time series). Necessary for some models, like HIVECOTE.
+RAW = 0 # Skips tsfresh feature generation (uses only raw time series). Necessary for some models, like ROCKET.
 
 # Tasks to load.
-TASKS = ["12", "13", "17","19"]
+TASKS = ["12","13","17","19"] # These tasks are based on the NEMO dataset
 
 # Keypoints to use during feature creation. It may be model specific, so check mediapipe_models.py
 PAIRS = ["15-16", "15-19", "15-20", "15-21", "15-22",
@@ -58,11 +63,13 @@ PAIRS = ["15-16", "15-19", "15-20", "15-21", "15-22",
          ]
 KEYPOINTS = [15,16,19,20,21,22]
 KEYPOINTS = KEYPOINTS + PAIRS
-#KEYPOINTS = [19,21]
 
 # Data equalization method
-DATA_LENGTH = 902 # This is used to pad (or cut!) the raw data.
-DATA_CUT_MODE = "copy_butterworth"
+DATA_LENGTH = 300 # This is used to pad (or cut!) the raw data.
+DATA_CUT_MODE = "copy"
+# One of:
+# copy
+# pad
 
 ## ## ## ## ## ## ## ##
 
