@@ -1,6 +1,3 @@
-SERVER_IP = "upzkh1014.zkh.umcg.intra"
-USERNAME = "MartinezGaR"
-PATH_TO_VIDEOS = "/home/data/derivatives/movement_registration/video_data/video/"
 TASKS_DICT = {
     1:"Arms on lap, palms upward",
     2:"Wrists straight, palms upward",
